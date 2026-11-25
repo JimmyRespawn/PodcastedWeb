@@ -1,5 +1,10 @@
 let currentPodcastInfo = null;
+let currentEpisodes = [];
+let sharedEpisodeStart = null;
 let playingPodcastInfo = null;
+let playingEpisode = null;
+let visibleEpisode = null;
+const episodeCatalog = new Map();
 let pendingPlaybackPosition = null;
 const playbackStorageKey = "podcasted.playback.v1";
 
@@ -19,6 +24,7 @@ function savePlaybackState() {
       url: player.src,
       title: document.getElementById("currentEpisodeTitle").textContent,
       podcast: playingPodcastInfo,
+      episode: playingEpisode,
       position: player.ended ? 0 : player.currentTime || 0,
       rate: player.playbackRate,
       volume: player.volume,
@@ -32,6 +38,7 @@ function restorePlaybackState() {
   if (!state) return;
   const player = document.getElementById("player");
   playingPodcastInfo = state.podcast;
+  playingEpisode = state.episode || { title: state.title || "Saved episode", audioUrl: state.url, podcast: state.podcast };
   pendingPlaybackPosition = state.position;
   player.src = state.url;
   player.playbackRate = [0.75, 1, 1.25, 1.5, 2].includes(state.rate) ? state.rate : 1;
@@ -42,9 +49,6 @@ function restorePlaybackState() {
   document.getElementById("playPauseButton").disabled = false;
   document.getElementById("elapsedTime").textContent = formatPodcastDuration(String(Math.floor(state.position)));
   updatePlayerInfo();
-  const status = document.getElementById("playerStatus");
-  status.textContent = "Progress restored. Press Play to continue.";
-  status.hidden = false;
 }
 function setLoadingState(type, loading) {
   const isFeed = type === "feed";
@@ -83,36 +87,228 @@ function navigatePage(direction) {
   pageHistoryIndex = nextIndex;
   const page = pageHistory[pageHistoryIndex];
   document.getElementById("searchInput").value = page.type === "discover" ? "" : page.query;
+  updateSearchClearButton();
   if (page.type === "discover") showDiscover(false);
+  else if (page.type === "queue") showQueue(false);
+  else if (page.type === "settings") showSettings(false);
+  else if (page.type === "episode") showEpisodeDetails(page.episode, false);
   else if (page.type === "feed") loadPodcastList(page.query, false);
   else searchPodcasts(page.query, false, false);
   updateHistoryButtons();
 }
 
-document.addEventListener("DOMContentLoaded", function () {
+document.addEventListener("DOMContentLoaded", async function () {
+  await Promise.all(["fluent-button", "fluent-text-input", "fluent-dropdown", "fluent-listbox", "fluent-option", "fluent-slider"].map(tag => customElements.whenDefined(tag)));
+  // Wait for v3 dropdown option slots before restoring saved control values.
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  // Mobile autofill reads the native input, not just the Fluent host attributes.
+  const nativeSearchInput = document.getElementById("searchInput").shadowRoot?.querySelector("input");
+  if (nativeSearchInput) {
+    for (const [name, value] of Object.entries({ type: "search", name: "podcast-search", autocomplete: "off", autocorrect: "off", autocapitalize: "none", spellcheck: "false", enterkeyhint: "search" })) {
+      nativeSearchInput.setAttribute(name, value);
+    }
+  }
+  document.getElementById("searchInput").addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.isComposing) handleSearchSubmit(event);
+  });
+  document.querySelector(".unified-search").addEventListener("click", event => {
+    if (!event.target.closest("fluent-button")) document.getElementById("searchInput").focus();
+  });
+  const languagePicker = document.getElementById("languagePicker");
+  languagePicker.value = window.PodcastedI18n.preference;
+  languagePicker.addEventListener("change", () => window.PodcastedI18n.setPreference(languagePicker.value));
+  window.addEventListener("podcastedlanguagechange", () => {
+    languagePicker.value = window.PodcastedI18n.preference;
+    const message = document.getElementById("playerStatusText");
+    if (message.dataset.message) message.textContent = t(message.dataset.message);
+    updateEpisodeDetailPlayButton();
+    document.querySelectorAll('.pub-date[data-date]').forEach(node => { node.textContent = formatDate(node.dataset.date); });
+    const expanded = document.getElementById("audioPlayerPanel").classList.contains("is-expanded");
+    document.getElementById("expandPlayerButton").setAttribute("aria-label", t(expanded ? "Close full-screen player" : "Open full-screen player"));
+    const page = pageHistory[pageHistoryIndex];
+    if (page?.type === "search") document.getElementById("browseTitle").textContent = t("Results for “{query}”", {query: page.query});
+    if (visibleEpisode) {
+      document.getElementById("episodeDetailMeta").textContent = [formatDate(visibleEpisode.pubDate), visibleEpisode.duration].filter(Boolean).join(" · ");
+      renderEpisodeShownotes(visibleEpisode);
+    }
+  });
+  const searchInput = document.getElementById("searchInput");
+  searchInput.addEventListener("input", updateSearchClearButton);
+  searchInput.addEventListener("change", updateSearchClearButton);
+  document.getElementById("clearSearchButton").addEventListener("click", () => {
+    searchInput.value = "";
+    updateSearchClearButton();
+    searchInput.focus();
+  });
+  updateSearchClearButton();
   initializePlayer();
+  const themePicker = document.getElementById("themePicker");
+  themePicker.value = window.PodcastedTheme.preference;
+  let themePickerInteraction = false;
+  themePicker.addEventListener("pointerdown", () => { themePickerInteraction = true; });
+  themePicker.addEventListener("keydown", () => { themePickerInteraction = true; });
+  document.addEventListener("pointerdown", event => {
+    if (!event.composedPath().includes(themePicker)) themePickerInteraction = false;
+  }, true);
+  themePicker.addEventListener("change", () => {
+    // Dropdown initialization/focus updates must not change the saved appearance.
+    if (!themePickerInteraction || document.getElementById("settingsPage").hidden) {
+      themePicker.value = window.PodcastedTheme.preference;
+      return;
+    }
+    themePickerInteraction = false;
+    if (themePicker.value !== window.PodcastedTheme.preference) window.PodcastedTheme.setPreference(themePicker.value);
+  });
+  window.addEventListener("podcastedthemechange", () => { themePicker.value = window.PodcastedTheme.preference; });
+  const accentPicker = document.getElementById("accentColorPicker");
+  const syncAccentPicker = () => {
+    accentPicker.value = window.PodcastedAccent.color;
+    document.getElementById("accentColorValue").textContent = window.PodcastedAccent.color.toUpperCase();
+    document.getElementById("resetAccentColor").disabled = window.PodcastedAccent.color === window.PodcastedAccent.defaultColor;
+  };
+  accentPicker.addEventListener("input", () => window.PodcastedAccent.setColor(accentPicker.value));
+  accentPicker.addEventListener("change", () => window.PodcastedAccent.setColor(accentPicker.value));
+  document.getElementById("resetAccentColor").addEventListener("click", () => window.PodcastedAccent.setColor(window.PodcastedAccent.defaultColor));
+  window.addEventListener("podcastedaccentchange", syncAccentPicker);
+  syncAccentPicker();
+  initializeQueue();
   const urlParams = new URLSearchParams(window.location.search);
+  initializeSubscriptions();
   const podUrl = urlParams.get("podurl");
   const playUrl = urlParams.get("play");
 
   if (podUrl) {
     document.getElementById("searchInput").value = podUrl;
-    loadPodcastList(podUrl);
+  updateSearchClearButton();
+    await loadPodcastList(podUrl);
   } else showDiscover();
 
-  if (playUrl) {
-    playEpisode(playUrl);
+  const sharedAudio = urlParams.get("episode");
+  const requestedTime = Number(urlParams.get("t"));
+  const startPosition = Number.isFinite(requestedTime) && requestedTime >= 0 ? requestedTime : 0;
+  if (sharedAudio) {
+    const episode = currentEpisodes.find(item => item.audioUrl === sharedAudio);
+    if (episode) {
+      sharedEpisodeStart = { url: sharedAudio, position: startPosition };
+      showEpisodeDetails(episode);
+    } else showPlayerStatus("This shared episode could not be found in the feed.", "error");
+  } else if (playUrl) {
+    playEpisode(playUrl, undefined, undefined, urlParams.has("t") ? startPosition : null);
   } else restorePlaybackState();
+  initializePlayerTools();
+  initializePlayerMoreMenu();
+  initializeEpisodeFeatures();
+  initializeMobileHeader();
 });
 
 // 前端 JavaScript 更新
 // 更新后的加载函数
 let feedRequestId = 0;
+
+function parsePodcastAuthor(channel) {
+  // Match XML names directly: CSS selectors can miss namespaced RSS fields.
+  // Only inspect channel metadata, so an episode's author is never used here.
+  const fields = Array.from(channel.children);
+  const text = element => element?.textContent?.trim() || "";
+  const itunesField = name => fields.find(element => element.localName === name &&
+    (/itunes\.com\/dtds\/podcast/i.test(element.namespaceURI || "") || element.prefix === "itunes"));
+  const owner = itunesField("owner");
+  return text(itunesField("author")) ||
+    text(fields.find(element => element.localName === "creator")) ||
+    text(fields.find(element => element.localName === "author")) ||
+    text(owner && Array.from(owner.children).find(element => element.localName === "name")) ||
+    text(fields.find(element => element.localName === "managingEditor")) ||
+    "Unknown Author";
+}
+
+function parsePodcastMetadata(channel, feedUrl) {
+  const fields = Array.from(channel.children);
+  const categories = [];
+  const readCategory = node => {
+    const value = (node.getAttribute("text") || Array.from(node.childNodes)
+      .filter(child => child.nodeType === 3).map(child => child.textContent).join("")).trim();
+    if (value && !categories.includes(value)) categories.push(value);
+    Array.from(node.children).filter(child => child.localName === "category").forEach(readCategory);
+  };
+  fields.filter(node => node.localName === "category").forEach(readCategory);
+  let website = "";
+  for (const node of fields.filter(node => node.localName === "link" && !node.namespaceURI)) {
+    try {
+      const url = new URL(node.textContent.trim(), feedUrl);
+      if (node.textContent.trim() && ["http:", "https:"].includes(url.protocol) && !url.username && !url.password) {
+        website = url.href;
+        break;
+      }
+    } catch { /* Ignore invalid website links. */ }
+  }
+  const updateFrequency = fields.find(node => node.localName === "updateFrequency" &&
+    ["https://podcastindex.org/namespace/1.0", "https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md"].includes(node.namespaceURI))?.textContent.trim() || "";
+  return { categories, website, updateFrequency };
+}
+
+function renderPodcastMetadata(metadata) {
+  const container = document.getElementById("podcastMetadata");
+  container.replaceChildren();
+  for (const category of metadata.categories) {
+    const badge = document.createElement("span");
+    badge.className = "podcast-category";
+    badge.textContent = category;
+    container.appendChild(badge);
+  }
+  if (metadata.website) {
+    const link = document.createElement("a");
+    link.href = metadata.website;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = new URL(metadata.website).hostname.replace(/^www\./, "");
+    container.appendChild(link);
+  }
+  if (metadata.updateFrequency) {
+    const schedule = document.createElement("span");
+    schedule.textContent = metadata.updateFrequency;
+    container.appendChild(schedule);
+  }
+  container.hidden = !container.childNodes.length;
+}
+
+function parsePodcastCover(channel, feedUrl) {
+  const fields = Array.from(channel.children);
+  const candidates = fields.filter(node => node.localName === "image").map(node =>
+    node.getAttribute("href") || Array.from(node.children).find(child => child.localName === "url")?.textContent);
+  for (const candidate of candidates) {
+    if (!candidate?.trim()) continue;
+    try {
+      const url = new URL(candidate.trim(), feedUrl);
+      if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) return url.href;
+    } catch { /* Try the next channel artwork field. */ }
+  }
+  return "";
+}
+
+function parseEpisodeCover(item, feedUrl) {
+  const cover = parsePodcastCover(item, feedUrl);
+  if (cover) return cover;
+  // Some publishers use Media RSS instead of an iTunes image.
+  const candidates = Array.from(item.getElementsByTagName("*")).filter(node =>
+    (node.localName === "thumbnail" && /search\.yahoo\.com\/mrss/.test(node.namespaceURI || "")) ||
+    (node.localName === "content" && (node.getAttribute("medium") === "image" || /^image\//i.test(node.getAttribute("type") || ""))));
+  for (const node of candidates) {
+    const value = node.getAttribute("url");
+    if (!value?.trim()) continue;
+    try {
+      const url = new URL(value.trim(), feedUrl);
+      if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) return url.href;
+    } catch { /* Try the next episode artwork field. */ }
+  }
+  return "";
+}
+
 async function loadPodcastList(podUrl = document.getElementById("searchInput").value.trim(), addHistory = true) {
   if (!podUrl) {
     alert("Please Enter Valid RSS URL");
     return;
   }
+  setNavigationView("feed");
 
   if (addHistory) recordPage({ type: "feed", query: podUrl });
   const episodeList = document.getElementById("episodeList");
@@ -122,9 +318,13 @@ async function loadPodcastList(podUrl = document.getElementById("searchInput").v
   document.getElementById("podcastDetail").hidden = false;
   document.getElementById("podcastInfo").style.display = "none";
   const feedStatus = document.getElementById("feedStatus");
-  feedStatus.hidden = false;
-  feedStatus.classList.add("is-loading");
-  feedStatus.textContent = "Loading episodes…";
+  feedStatus.hidden = true;
+  feedStatus.textContent = "";
+  currentEpisodes = [];
+  document.getElementById("episodeFilterEmpty").hidden = true;
+  document.getElementById("episodeList").hidden = false;
+  document.getElementById("episodeTools").hidden = true;
+  document.getElementById("feedDownload").hidden = true;
   setLoadingState("feed", true);
   episodeList.innerHTML = "";
 
@@ -140,21 +340,24 @@ async function loadPodcastList(podUrl = document.getElementById("searchInput").v
     const channel = xml.querySelector("channel");
     if (!channel) throw new Error("Invalid podcast RSS feed");
     const title = channel.querySelector("title")?.textContent || "Untitled";
-    const author = channel.querySelector("itunes\\:author")?.textContent || "Unknown Author";
-    const image = channel.querySelector("itunes\\:image")?.getAttribute("href") ||
-                  channel.querySelector("image > url")?.textContent ||
-                  "";
+    const author = parsePodcastAuthor(channel);
+    const image = parsePodcastCover(channel, response.url || podUrl);
     const description = channel.querySelector("description")?.textContent || "No description";
 
    const items = Array.from(channel.getElementsByTagName("item")).map(item => {
   const getText = (tag) => item.getElementsByTagName(tag)[0]?.textContent?.trim() || "";
   const getAttr = (tag, attr) => item.getElementsByTagName(tag)[0]?.getAttribute(attr) || "";
+  const descriptionHtml = getText("content:encoded") || getText("description") || getText("itunes:summary");
 
   return {
     title: getText("title") || "No Title",
     audioUrl: getAttr("enclosure", "url"),
+    cover: parseEpisodeCover(item, response.url || podUrl),
     pubDate: getText("pubDate"),
-    duration: formatPodcastDuration(getText("itunes:duration") || "0")
+    duration: formatPodcastDuration(getText("itunes:duration") || "0"),
+    description: plainEpisodeDescription(descriptionHtml),
+    descriptionHtml,
+    link: getText("link")
   };
 });
 
@@ -166,42 +369,33 @@ async function loadPodcastList(podUrl = document.getElementById("searchInput").v
     podcastInfo.style.display = "flex";
     const podcastCover = document.getElementById("podcastCover");
     podcastCover.hidden = !image;
-    if (image) podcastCover.src = encodeURI(image);
+    if (image) podcastCover.src = image;
     else podcastCover.removeAttribute("src");
     document.getElementById("podcastTitle").textContent = title;
-    document.getElementById("podcastAuthor").textContent = `by ${author}`;
+    document.getElementById("podcastAuthor").textContent = author;
     const descriptionDocument = new DOMParser().parseFromString(description, "text/html");
     document.getElementById("podcastDesc").textContent = descriptionDocument.body.textContent;
 
 
-    currentPodcastInfo = { author, title, cover: encodeURI(image) };
-
-    const list = document.getElementById("episodeList");
-    list.innerHTML = items.map((ep) => {
-      const safeTitle = escapeHTML(ep.title);
-      const safeUrl = encodeURIComponent(ep.audioUrl);
-      return `
-        <li data-url="${safeUrl}" data-title="${safeTitle}">
-          <div class="episode-copy">
-            <span class="episode-title">${safeTitle}</span>
-            <div class="episode-meta">
-              <span class="duration">${ep.duration}</span>
-              <span class="pub-date">${formatDate(ep.pubDate)}</span>
-            </div>
-          </div>
-          <button type="button" class="episode-play" aria-label="Play ${safeTitle}" title="Play episode">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4 20 12 8 20Z" /></svg>
-          </button>
-        </li>`;
-    }).join("");
-
-    list.querySelectorAll("li").forEach((li) => {
-      li.addEventListener("click", () => {
-        const url = decodeURIComponent(li.dataset.url);
-        const title = li.dataset.title;
-        playEpisode(url, title);
-      });
+    const metadata = parsePodcastMetadata(channel, response.url || podUrl);
+    renderPodcastMetadata(metadata);
+    currentPodcastInfo = { author, title, cover: image, feedUrl: new URL(podUrl).href, ...metadata };
+    updateSubscribeButton();
+    items.forEach(episode => {
+      episode.podcast = currentPodcastInfo;
+      episodeCatalog.set(episode.audioUrl, episode);
     });
+    if (playingEpisode && episodeCatalog.has(playingEpisode.audioUrl)) {
+      playingEpisode = episodeCatalog.get(playingEpisode.audioUrl);
+      playingPodcastInfo = playingEpisode.podcast;
+      updatePlayerInfo();
+    }
+
+    currentEpisodes = items;
+    document.getElementById("episodeFilter").value = "";
+    document.getElementById("episodeSort").value = "newest";
+    document.getElementById("episodeTools").hidden = false;
+    renderEpisodes();
     feedStatus.hidden = true;
 
   } catch (error) {
@@ -209,12 +403,12 @@ async function loadPodcastList(podUrl = document.getElementById("searchInput").v
     console.error("Error:", error);
     episodeList.innerHTML = "";
     const status = document.getElementById("feedStatus");
-    status.textContent = "Unable to load this RSS feed. Check the URL and whether the feed allows browser access (CORS).";
+    status.textContent = t("This podcast cannot be opened in the web player.");
     status.hidden = false;
+    document.getElementById("feedDownload").hidden = false;
   } finally {
     if (requestId === feedRequestId) {
       setLoadingState("feed", false);
-      feedStatus.classList.remove("is-loading");
     }
   }
 }
@@ -267,7 +461,7 @@ document.getElementById("podcastCover").onerror = function () {
 };
 
 // 更新播放函数
-function playEpisode(url, title) {
+function playEpisode(url, title, episode = episodeCatalog.get(url), startPosition = null) {
   const player = document.getElementById("player");
   const currentEpisodeTitle = document.getElementById("currentEpisodeTitle");
 
@@ -279,34 +473,19 @@ function playEpisode(url, title) {
 
     savePlaybackState();
     const saved = readPlaybackState();
-    playingPodcastInfo = currentPodcastInfo;
-    pendingPlaybackPosition = saved?.url === url ? saved.position : 0;
+    playingEpisode = episode || { title: title || "Episode", audioUrl: url, podcast: currentPodcastInfo };
+    playingPodcastInfo = playingEpisode.podcast || currentPodcastInfo;
+    pendingPlaybackPosition = Number.isFinite(startPosition) ? startPosition
+      : sharedEpisodeStart?.url === url ? sharedEpisodeStart.position
+      : saved?.url === url ? saved.position : 0;
+    sharedEpisodeStart = null;
     player.src = url;
-    //Then is using system control to support showing image/title/arthur
-    player.play().then(() => {
-      if (playingPodcastInfo && "mediaSession" in navigator) {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: title,
-          artist: playingPodcastInfo.author,
-          album: playingPodcastInfo.title,
-          artwork: generateArtworkArray(playingPodcastInfo.cover),
-        });
-      }
-    }).catch(showPlaybackError);
+    player.play().catch(showPlaybackError);
     document.getElementById("playPauseButton").disabled = false;
     document.getElementById("playerStatus").hidden = true;
     currentEpisodeTitle.textContent = title || "Playing...";
     updatePlayerInfo();
 
-    // 添加播放控制（可选）
-    if ("mediaSession" in navigator) {
-      navigator.mediaSession.setActionHandler("seekbackward", () => {
-        seekBackward();
-      });
-      navigator.mediaSession.setActionHandler("seekforward", () => {
-        seekForward();
-      });
-    }
   } catch (error) {
     console.error("Playback error:", error);
     alert("Error playing episode");
@@ -338,19 +517,169 @@ function seekBackward() {
 }
 
 function updatePlayerInfo() {
+  updateEpisodeListPlaybackState();
+  window.dispatchEvent(new Event("podcastedplayerchange"));
+  syncQueueCurrentEpisode();
+  syncMediaMetadata();
   const cover = document.getElementById("playerCover");
   cover.hidden = !playingPodcastInfo?.cover;
   if (playingPodcastInfo?.cover) cover.src = playingPodcastInfo.cover;
   document.getElementById("playerSubtitle").textContent = playingPodcastInfo
-    ? `${playingPodcastInfo.title} · ${playingPodcastInfo.author}` : "Podcasted";
+    ? `${playingPodcastInfo.title} · ${playingPodcastInfo.author}` : t("Podcasted");
+  ["currentEpisodeTitle", "playerSubtitle"].forEach(id => {
+    const canOpen = id === "currentEpisodeTitle" ? Boolean(playingEpisode?.audioUrl) : Boolean(playingPodcastInfo?.feedUrl);
+    const link = document.getElementById(id);
+    link.setAttribute("aria-disabled", String(!canOpen));
+    link.tabIndex = canOpen ? 0 : -1;
+    link.title = canOpen ? (id === "currentEpisodeTitle" ? t("Open episode details") : t("Open podcast episodes")) : "";
+  });
+}
+
+function syncMediaMetadata(useAppIcon = false) {
+  if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined") return;
+  const player = document.getElementById("player");
+  if (!player.getAttribute("src")) return;
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: playingEpisode?.title || document.getElementById("currentEpisodeTitle").textContent || t("Podcasted"),
+      artist: playingPodcastInfo?.title || playingPodcastInfo?.author || t("Podcasted"),
+      album: playingPodcastInfo?.author || "",
+      artwork: generateArtworkArray(useAppIcon ? null : playingPodcastInfo?.cover),
+    });
+    navigator.mediaSession.playbackState = player.paused || player.ended ? "paused" : "playing";
+  } catch (error) { console.debug("Media metadata unavailable:", error); }
+}
+
+function syncMediaPosition() {
+  if (!("mediaSession" in navigator) || !navigator.mediaSession.setPositionState) return;
+  const player = document.getElementById("player");
+  try {
+    if (!Number.isFinite(player.duration) || player.duration <= 0) navigator.mediaSession.setPositionState();
+    else navigator.mediaSession.setPositionState({
+      duration: player.duration,
+      position: Math.max(0, Math.min(player.duration, player.currentTime || 0)),
+      playbackRate: player.playbackRate,
+    });
+  } catch { /* Position reporting is optional on older browsers. */ }
+}
+
+function initializeMediaSession() {
+  if (!("mediaSession" in navigator)) return;
+  const player = document.getElementById("player");
+  const seek = position => {
+    if (Number.isFinite(player.duration)) player.currentTime = Math.max(0, Math.min(player.duration, position));
+  };
+  const actions = {
+    play: () => { if (player.getAttribute("src")) player.play().catch(showPlaybackError); },
+    pause: () => player.pause(),
+    seekbackward: details => seek(player.currentTime - (details.seekOffset || 15)),
+    seekforward: details => seek(player.currentTime + (details.seekOffset || 30)),
+    seekto: details => { if (Number.isFinite(details.seekTime)) seek(details.seekTime); },
+  };
+  Object.entries(actions).forEach(([action, handler]) => {
+    try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* Unsupported action. */ }
+  });
+}
+
+function openPlayingPodcast(event) {
+  event.preventDefault();
+  if (!playingPodcastInfo?.feedUrl) return;
+  setExpandedPlayer(false);
+  loadPodcastList(playingPodcastInfo.feedUrl);
+  document.getElementById("contentScroll").scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function plainEpisodeDescription(html) {
+  const text = String(html || "").replace(/<br\s*\/?\s*>/gi, "\n").replace(/<\/(p|div|li|h[1-6])>/gi, "\n\n");
+  const parsed = new DOMParser().parseFromString(text, "text/html");
+  parsed.querySelectorAll("script, style").forEach(element => element.remove());
+  return parsed.body.textContent.replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function openPlayingEpisode(event) {
+  event.preventDefault();
+  if (playingEpisode?.audioUrl) showEpisodeDetails(playingEpisode);
+}
+
+function showEpisodeDetails(episode, addHistory = true) {
+  if (!episode) return;
+  setExpandedPlayer(false);
+  if (addHistory) recordPage({ type: "episode", query: "", episode });
+  ++feedRequestId;
+  ++searchRequestId;
+  setNavigationView("episode");
+  document.getElementById("searchDiv").hidden = true;
+  document.getElementById("podcastDetail").hidden = true;
+  document.getElementById("episodeDetail").hidden = false;
+  visibleEpisode = episode;
+  updateQueueControls();
+  document.getElementById("episodeDetailTitle").textContent = episode.title || "Episode";
+  const channel = document.getElementById("episodeDetailChannel");
+  channel.textContent = episode.podcast?.title || "Podcast";
+  channel.hidden = !episode.podcast?.feedUrl;
+  document.getElementById("episodeDetailMeta").textContent = [formatDate(episode.pubDate), episode.duration].filter(Boolean).join(" · ");
+  renderEpisodeShownotes(episode);
+  const artwork = document.getElementById("episodeDetailArtwork");
+  artwork.innerHTML = fluentIcon("music");
+  const covers = [...new Set([episode.cover, episode.podcast?.cover].filter(Boolean))];
+  if (covers.length) {
+    const image = document.createElement("img");
+    image.className = "cover";
+    image.alt = "";
+    let index = 0;
+    image.onerror = () => {
+      index++;
+      if (index < covers.length) image.src = covers[index];
+      else image.remove();
+    };
+    image.src = covers[index];
+    artwork.appendChild(image);
+  }
+  const source = document.getElementById("episodeDetailSource");
+  source.hidden = true;
+  try {
+    const url = new URL(episode.link);
+    if (["http:", "https:"].includes(url.protocol)) { source.href = url.href; source.hidden = false; }
+  } catch { /* Some feeds do not include an episode website. */ }
+  updateEpisodeDetailPlayButton();
+  document.getElementById("contentScroll").scrollTo({ top: 0 });
+}
+
+function updateEpisodeDetailPlayButton() {
+  if (!visibleEpisode) return;
+  const player = document.getElementById("player");
+  const current = player.getAttribute("src") === visibleEpisode.audioUrl;
+  const button = document.getElementById("episodeDetailPlay");
+  button.disabled = !visibleEpisode.audioUrl;
+  button.textContent = current ? (player.paused || player.ended ? t("Resume") : t("Pause")) : t("Play episode");
+}
+
+function playDetailEpisode() {
+  if (!visibleEpisode?.audioUrl) return;
+  const player = document.getElementById("player");
+  if (player.getAttribute("src") === visibleEpisode.audioUrl) togglePlayback();
+  else playEpisode(visibleEpisode.audioUrl, visibleEpisode.title, visibleEpisode);
+}
+
+function openEpisodeChannel(event) {
+  event.preventDefault();
+  if (visibleEpisode?.podcast?.feedUrl) loadPodcastList(visibleEpisode.podcast.feedUrl);
+}
+
+function showPlayerStatus(message, intent = "info") {
+  const status = document.getElementById("playerStatus");
+  status.setAttribute("intent", intent);
+  status.setAttribute("role", intent === "error" ? "alert" : "status");
+  document.getElementById("playerStatusText").dataset.message = message;
+  document.getElementById("playerStatusText").textContent = t(message);
+  status.hidden = false;
 }
 
 function showPlaybackError(error) {
   console.error("Playback error:", error);
-  const status = document.getElementById("playerStatus");
-  status.textContent = error?.name === "NotAllowedError"
-    ? "Press Play to start listening." : "Unable to play this episode. Please try again.";
-  status.hidden = false;
+  const blocked = error?.name === "NotAllowedError";
+  showPlayerStatus(blocked ? "Press Play to start listening."
+    : "Unable to play this episode. Please try again.", blocked ? "info" : "error");
 }
 
 function togglePlayback() {
@@ -360,8 +689,66 @@ function togglePlayback() {
   else player.pause();
 }
 
+let playerReturnFocus = null;
+let playerTransition = null;
+function setExpandedPlayer(expanded) {
+  const panel = document.getElementById("audioPlayerPanel");
+  if (panel.classList.contains("is-expanded") === expanded) return;
+  const previousBounds = panel.getBoundingClientRect();
+  playerTransition?.cancel();
+  if (expanded) playerReturnFocus = document.activeElement;
+  panel.classList.toggle("is-expanded", expanded);
+  document.body.classList.toggle("player-expanded", expanded);
+  document.querySelector(".app-main").inert = expanded;
+  document.querySelector(".sidebar").inert = expanded || document.body.classList.contains("mobile-header-hidden");
+  document.getElementById("expandPlayerButton").setAttribute("aria-expanded", String(expanded));
+  document.getElementById("expandPlayerButton").setAttribute("aria-label", expanded ? t("Close full-screen player") : t("Open full-screen player"));
+  if (expanded) {
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    document.getElementById("closeExpandedPlayer").focus();
+  } else {
+    panel.removeAttribute("role");
+    panel.removeAttribute("aria-modal");
+    if (document.getElementById("playbackRate").open) document.getElementById("playbackRate").open = false;
+    playerReturnFocus?.focus();
+  }
+  if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const bounds = panel.getBoundingClientRect();
+    // Animate the existing player between its two layouts without replacing audio.
+    const transition = panel.animate([
+      {
+        transform: `translate(${previousBounds.left - bounds.left}px, ${previousBounds.top - bounds.top}px) scale(${previousBounds.width / bounds.width}, ${previousBounds.height / bounds.height})`,
+        transformOrigin: "top left",
+      },
+      { transform: "none", transformOrigin: "top left" },
+    ], { duration: 300, easing: "cubic-bezier(0.2, 0, 0, 1)" });
+    playerTransition = transition;
+    transition.onfinish = () => {
+      if (playerTransition === transition) playerTransition = null;
+    };
+  }
+}
+
 function initializePlayer() {
   const player = document.getElementById("player");
+  initializeMediaSession();
+  document.getElementById("closeExpandedPlayer").innerHTML = fluentIcon("back");
+  document.addEventListener("keydown", event => {
+    const panel = document.getElementById("audioPlayerPanel");
+    if (!panel.classList.contains("is-expanded")) return;
+    if (event.key === "Escape" && !event.defaultPrevented && !document.getElementById("playbackRate").open) {
+      event.preventDefault();
+      setExpandedPlayer(false);
+    }
+    if (event.key !== "Tab") return;
+    const controls = Array.from(panel.querySelectorAll('button:not([slot]), a[href]:not([tabindex="-1"]), fluent-button:not([disabled]), fluent-slider:not([disabled]), fluent-dropdown'))
+      .filter(element => element.getClientRects().length && !element.closest("[hidden]"));
+    const first = controls[0], last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  });
+  let syncingControls = false;
   player.addEventListener("loadedmetadata", () => {
     if (pendingPlaybackPosition === null) return;
     const position = pendingPlaybackPosition;
@@ -381,25 +768,34 @@ function initializePlayer() {
   const progress = document.getElementById("playbackProgress");
   const playButton = document.getElementById("playPauseButton");
   const updateProgress = () => {
+    syncMediaPosition();
     const duration = Number.isFinite(player.duration) ? player.duration : 0;
     progress.disabled = duration <= 0;
-    progress.value = duration ? player.currentTime / duration * 100 : 0;
+    syncingControls = true;
+    progress.value = String(duration ? player.currentTime / duration * 100 : 0);
+    syncingControls = false;
     document.getElementById("elapsedTime").textContent = formatPodcastDuration(String(Math.floor(player.currentTime || 0)));
     document.getElementById("remainingTime").textContent = "-" + formatPodcastDuration(String(Math.floor(Math.max(0, duration - player.currentTime)) || 0));
     progress.setAttribute("aria-valuetext", `${document.getElementById("elapsedTime").textContent} elapsed`);
   };
   const updatePlayback = () => {
+    updateEpisodeDetailPlayButton();
     const playing = !player.paused && !player.ended;
-    playButton.setAttribute("aria-label", playing ? "Pause" : "Play");
-    playButton.title = playing ? "Pause" : "Play";
-    document.getElementById("playPauseIcon").setAttribute("d", playing
-      ? "M12 7h9v34h-9ZM28 7h9v34h-9Z" : "M14 6 42 24 14 42Z");
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.playbackState = player.getAttribute("src") ? (playing ? "playing" : "paused") : "none";
+    }
+    if (playing) syncMediaMetadata();
+    playButton.setAttribute("aria-label", playing ? t("Pause") : t("Play"));
+    playButton.title = playing ? t("Pause") : t("Play");
+    playButton.innerHTML = fluentIcon(playing ? "pause" : "play");
     if (playing) document.getElementById("playerStatus").hidden = true;
   };
   ["timeupdate", "loadedmetadata", "durationchange", "emptied"].forEach(event => player.addEventListener(event, updateProgress));
   ["play", "pause", "ended"].forEach(event => player.addEventListener(event, updatePlayback));
+  player.addEventListener("ratechange", syncMediaPosition);
   player.addEventListener("error", showPlaybackError);
-  progress.addEventListener("input", () => {
+  progress.addEventListener("change", () => {
+    if (syncingControls) return;
     if (Number.isFinite(player.duration)) player.currentTime = Number(progress.value) / 100 * player.duration;
     updateProgress();
   });
@@ -408,7 +804,13 @@ function initializePlayer() {
   });
   const volume = document.getElementById("volumeControl");
   const muteButton = document.getElementById("muteButton");
-  volume.addEventListener("input", () => {
+  // iPadOS can identify itself as macOS; touch points distinguish it from a Mac.
+  const usesSystemVolume = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  volume.hidden = usesSystemVolume;
+  volume.disabled = usesSystemVolume;
+  volume.addEventListener("change", () => {
+    if (syncingControls) return;
     player.volume = Number(volume.value);
     player.muted = player.volume === 0;
   });
@@ -418,12 +820,15 @@ function initializePlayer() {
   });
   player.addEventListener("volumechange", () => {
     const muted = player.muted || player.volume === 0;
-    volume.value = player.muted ? 0 : player.volume;
-    muteButton.setAttribute("aria-label", muted ? "Unmute" : "Mute");
-    muteButton.title = muted ? "Unmute" : "Mute";
-    document.getElementById("volumeWaves").style.opacity = muted ? "0.2" : "1";
+    syncingControls = true;
+    volume.value = String(player.muted ? 0 : player.volume);
+    syncingControls = false;
+    muteButton.setAttribute("aria-label", muted ? t("Unmute") : t("Mute"));
+    muteButton.title = muted ? t("Unmute") : t("Mute");
+    const volumeIcon = muted ? "muted" : player.volume <= 0.66 ? "volumeMedium" : "volume";
+    muteButton.innerHTML = fluentIcon(volumeIcon);
   });
-  document.getElementById("playerCover").addEventListener("error", event => { event.target.hidden = true; });
+  document.getElementById("playerCover").addEventListener("error", event => { event.target.hidden = true; syncMediaMetadata(true); });
   updateProgress();
   updatePlayback();
 }
@@ -432,7 +837,8 @@ function initializePlayer() {
 function formatDate(isoString) {
   if (!isoString) return "";
   const date = new Date(isoString);
-  return date.toLocaleDateString("en-US", {
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toLocaleDateString(window.PodcastedI18n.locale, {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -443,12 +849,13 @@ function formatDate(isoString) {
 
 // 生成符合标准的封面数组
 function generateArtworkArray(coverUrl) {
-  const sizes = [96, 128, 192, 256, 384, 512];
-  return sizes.map((size) => ({
-    src: `${coverUrl}?size=${size}`, // 假设图片服务支持尺寸参数
-    sizes: `${size}x${size}`,
-    type: "image/jpeg",
-  }));
+  if (coverUrl) {
+    try {
+      const url = new URL(coverUrl, window.location.href);
+      if (["http:", "https:", "file:"].includes(url.protocol)) return [{ src: url.href }];
+    } catch { /* Fall back to the local app artwork. */ }
+  }
+  return [{ src: new URL("icons/app-512.png", window.location.href).href, sizes: "512x512", type: "image/png" }];
 }
 
 let searchRequestId = 0;
@@ -498,21 +905,21 @@ function requestPodcastSearch(query, requestId, comedyOnly = false) {
 
 async function searchPodcasts(query = document.getElementById("searchInput").value.trim(), comedyOnly = false, addHistory = true) {
   if (!query) return;
+  setNavigationView("search");
   if (addHistory) recordPage({ type: comedyOnly ? "discover" : "search", query });
   const requestId = ++searchRequestId;
   ++feedRequestId;
   document.getElementById("searchDiv").hidden = false;
   document.getElementById("podcastDetail").hidden = true;
-  document.getElementById("browseTitle").textContent = comedyOnly ? "Comedy" : `Results for “${query}”`;
-  document.getElementById("browseEyebrow").textContent = comedyOnly ? "DISCOVER PODCASTS" : "SEARCH PODCASTS";
+  document.getElementById("browseTitle").textContent = comedyOnly ? "Comedy" : t("Results for “{query}”", {query});
+  document.getElementById("browseEyebrow").textContent = comedyOnly ? t("Dedicated to creators") : t("SEARCH PODCASTS");
   document.getElementById("retryBrowse").hidden = true;
 
   document.getElementById("searchEmptyState").hidden = true;
   const status = document.getElementById("searchStatus");
   const results = document.getElementById("searchResults");
-  status.hidden = false;
-  status.textContent = "Searching podcasts...";
-  status.classList.add("is-loading");
+  status.hidden = true;
+  status.textContent = "";
   setLoadingState("browse", true);
   results.hidden = true;
 
@@ -521,13 +928,13 @@ async function searchPodcasts(query = document.getElementById("searchInput").val
     if (!status.isConnected || requestId !== searchRequestId) return;
     const podcasts = data.results.filter(podcast => podcast.feedUrl && (!comedyOnly || podcast.genreIds?.includes("1303") || podcast.primaryGenreName === "Comedy"));
     displaySearchResults(podcasts);
-    status.textContent = podcasts.length ? "" : "No podcasts found. Try another name or topic.";
+    status.textContent = podcasts.length ? "" : t("No podcasts found. Try another name or topic.");
     status.hidden = podcasts.length > 0;
     results.hidden = podcasts.length === 0;
   } catch (error) {
     if (!status.isConnected || requestId !== searchRequestId) return;
     console.error("Search failed:", error);
-    status.textContent = "Search failed. Please try again.";
+    status.textContent = t("Search failed. Please try again.");
     status.hidden = false;
     document.getElementById("retryBrowse").hidden = !comedyOnly;
   } finally {
@@ -544,11 +951,13 @@ function displaySearchResults(podcasts) {
 
   podcasts.forEach((podcast) => {
     const li = document.createElement("li");
-    const button = document.createElement("button");
+    const button = document.createElement("fluent-button");
     button.className = "podcast-card";
+    button.setAttribute("role", "button");
+    button.setAttribute("appearance", "subtle");
     const artwork = document.createElement("div");
     artwork.className = "card-artwork";
-    artwork.textContent = "♫";
+    artwork.innerHTML = fluentIcon("music");
     const image = document.createElement("img");
     image.src = podcast.artworkUrl600 || podcast.artworkUrl100;
     image.alt = "";
@@ -573,14 +982,16 @@ function selectPodcast(feedUrl) {
 }
 
 function showDiscover(addHistory = true) {
+  setNavigationView("listen");
   if (addHistory) recordPage({ type: "discover", query: "" });
   ++searchRequestId;
   ++feedRequestId;
   document.getElementById("searchInput").value = "";
+  updateSearchClearButton();
   document.getElementById("searchDiv").hidden = false;
   document.getElementById("podcastDetail").hidden = true;
-  document.getElementById("browseTitle").textContent = "Discover";
-  document.getElementById("browseEyebrow").textContent = "DISCOVER PODCASTS";
+  document.getElementById("browseTitle").textContent = t("Listen");
+  document.getElementById("browseEyebrow").textContent = t("Dedicated to creators");
   document.getElementById("searchEmptyState").hidden = false;
   document.getElementById("searchStatus").hidden = true;
   document.getElementById("searchStatus").classList.remove("is-loading");
@@ -589,12 +1000,44 @@ function showDiscover(addHistory = true) {
   document.getElementById("retryBrowse").hidden = true;
   setLoadingState("browse", false);
   setLoadingState("feed", false);
+  renderLinkedSubscriptions();
+}
+
+function setNavigationView(view) {
+  resetMobileHeader();
+  hideLinkedSubscriptions();
+  document.getElementById("episodeDetail").hidden = true;
+  document.getElementById("settingsPage").hidden = view !== "settings";
+  document.getElementById("queuePage").hidden = view !== "queue";
+  [["discoverNav", "listen"], ["queueNav", "queue"], ["settingsNav", "settings"]].forEach(([id, name]) => {
+    const item = document.getElementById(id);
+    item.classList.toggle("active", view === name);
+    if (view === name) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
+}
+
+function showSettings(addHistory = true) {
+  if (addHistory) recordPage({ type: "settings", query: "" });
+  ++feedRequestId;
+  ++searchRequestId;
+  setNavigationView("settings");
+  document.getElementById("searchDiv").hidden = true;
+  document.getElementById("podcastDetail").hidden = true;
+  document.getElementById("searchInput").value = "";
+  updateSearchClearButton();
+  document.getElementById("themePicker").value = window.PodcastedTheme.preference;
+  document.getElementById("contentScroll").scrollTo({ top: 0 });
 }
 
 // Native form submission supports both Enter and the Search button.
 function handleSearchSubmit(event) {
   event.preventDefault();
-  const query = document.getElementById("searchInput").value.trim();
+  const searchInput = document.getElementById("searchInput");
+  const query = searchInput.value.trim();
+  // The editable input lives inside the Fluent component's shadow root.
+  searchInput.shadowRoot?.activeElement?.blur();
+  searchInput.blur();
   if (!query) { showDiscover(); return; }
   if (/^https?:\/\//i.test(query)) loadPodcastList(query);
   else searchPodcasts(query);
@@ -604,4 +1047,8 @@ function handleRSSURLEnter(event) {
   if (event.key === "Enter") {
     loadPodcastList();
   }
+}
+
+function updateSearchClearButton() {
+  document.getElementById("clearSearchButton").hidden = !String(document.getElementById("searchInput").value || "").length;
 }
