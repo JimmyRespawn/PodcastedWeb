@@ -1003,6 +1003,27 @@ function showDiscover(addHistory = true) {
   renderLinkedSubscriptions();
 }
 
+function moveNavIndicator(selected) {
+  const indicator = document.querySelector(".nav-indicator");
+  if (selected && indicator.parentElement === selected && !indicator.hidden) return;
+  const from = indicator.getBoundingClientRect();
+  indicator.getAnimations().forEach(animation => animation.cancel());
+  indicator.hidden = !selected;
+  if (!selected) return;
+  selected.appendChild(indicator);
+  const to = indicator.getBoundingClientRect();
+  if (!from.width || !to.width || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  const dx = from.left + from.width / 2 - to.left - to.width / 2;
+  const dy = from.top + from.height / 2 - to.top - to.height / 2;
+  const horizontal = Math.abs(dx) > Math.abs(dy);
+  indicator.animate([
+    { transform: `translate(${dx}px, ${dy}px) scale(${from.width / to.width}, ${from.height / to.height})` },
+    { transform: `translate(${dx * 0.4}px, ${dy * 0.4}px) scale(${horizontal ? 2 : 1}, ${horizontal ? 1 : 1.65})`, offset: 0.55 },
+    { transform: "none" }
+  ], { duration: 280, easing: "cubic-bezier(.3,0,.15,1)" });
+}
+
 function setNavigationView(view) {
   resetMobileHeader();
   hideLinkedSubscriptions();
@@ -1015,6 +1036,7 @@ function setNavigationView(view) {
     if (view === name) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
   });
+  moveNavIndicator(document.querySelector('.sidebar .nav-item[aria-current="page"]'));
 }
 
 function showSettings(addHistory = true) {

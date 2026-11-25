@@ -4,12 +4,15 @@
   const presets = [15, 30, 45, 60, 90];
   let deadline = 0;
   let minutes = 0;
+  let custom = false;
   let interval;
   let syncingPicker = false;
 
   function syncPicker() {
     syncingPicker = true;
-    document.getElementById("sleepTimerPicker").value = String(minutes);
+    document.getElementById("sleepTimerPicker").value = custom ? "custom" : String(minutes);
+    document.getElementById("customTimerForm").hidden = !custom;
+    if (custom) document.getElementById("customTimerMinutes").value = String(minutes);
     syncingPicker = false;
   }
 
@@ -33,6 +36,7 @@
     interval = undefined;
     deadline = 0;
     minutes = 0;
+    custom = false;
     try { localStorage.removeItem(storageKey); } catch { /* Storage is optional. */ }
     syncPicker();
     updateTimerDisplay();
@@ -49,14 +53,17 @@
     updateTimerDisplay();
   }
 
-  function startTimer(value) {
-    const selected = Number(value);
-    if (selected !== 0 && !presets.includes(selected)) return;
-    stopTimer();
-    if (!selected) return;
+  function validMinutes(value) {
+    return Number.isInteger(value) && value >= 1 && value <= 1440;
+  }
+
+  function startTimer(selected, isCustom) {
+    if (!validMinutes(selected)) return;
+    clearInterval(interval);
+    custom = isCustom;
     minutes = selected;
     deadline = Date.now() + minutes * 60000;
-    try { localStorage.setItem(storageKey, JSON.stringify({ deadline, minutes })); } catch { /* Optional persistence. */ }
+    try { localStorage.setItem(storageKey, JSON.stringify({ deadline, minutes, custom })); } catch { /* Optional persistence. */ }
     syncPicker();
     updateTimerDisplay();
     interval = setInterval(checkTimer, 1000);
@@ -71,14 +78,30 @@
 
   window.initializePlayerTools = () => {
     const player = document.getElementById("player");
+    const form = document.getElementById("customTimerForm");
+    const input = document.getElementById("customTimerMinutes");
     document.getElementById("sleepTimerPicker").addEventListener("change", event => {
-      if (!syncingPicker) startTimer(event.currentTarget.value);
+      if (syncingPicker) return;
+      const value = event.currentTarget.value;
+      if (value === "custom") {
+        form.hidden = false;
+        input.focus();
+      } else if (value === "0") {
+        stopTimer();
+      } else if (presets.includes(Number(value))) {
+        startTimer(Number(value), false);
+      }
+    });
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      startTimer(input.valueAsNumber, true);
     });
     try {
       const saved = JSON.parse(localStorage.getItem(storageKey));
-      if (Number.isFinite(saved?.deadline) && presets.includes(saved.minutes)) {
+      if (Number.isFinite(saved?.deadline) && validMinutes(saved.minutes)) {
         deadline = saved.deadline;
         minutes = saved.minutes;
+        custom = saved.custom === true || !presets.includes(minutes);
         syncPicker();
         checkTimer();
         if (deadline) interval = setInterval(checkTimer, 1000);

@@ -1,6 +1,7 @@
 // Interface strings only. Podcast metadata always stays in its original language.
 (() => {
   const ja = {
+    'Custom duration':'時間を指定', 'Minutes':'分', 'Start timer':'タイマーを開始',
     'Unable to share. Try copying the link.':'共有できませんでした。リンクをコピーしてください。',
     'Primary color':'メインカラー', 'Lighter shades are generated automatically.':'淡い色合いは自動的に生成されます。', 'Reset color':'色をリセット',
     'Focus search':'検索欄に移動',
@@ -86,6 +87,7 @@
     'No description available for this episode.':'このエピソードには説明がありません。'
   };
   const fr = {
+    'Custom duration':'Durée personnalisée', 'Minutes':'Minutes', 'Start timer':'Démarrer',
     'Unable to share. Try copying the link.':'Impossible de partager. Essayez de copier le lien.',
     'Primary color':'Couleur principale', 'Lighter shades are generated automatically.':'Les teintes claires sont générées automatiquement.', 'Reset color':'Réinitialiser la couleur',
     'Focus search':'Activer la recherche',
@@ -171,6 +173,7 @@
     'No description available for this episode.':'Aucune description disponible pour cet épisode.'
   };
   const zhHant = {
+    'Custom duration':'自訂時長', 'Minutes':'分鐘', 'Start timer':'開始計時',
     'Unable to share. Try copying the link.':'無法分享，請試著複製連結。',
     'Primary color':'主色', 'Lighter shades are generated automatically.':'自動產生搭配的淺色。', 'Reset color':'恢復預設顏色',
     'Focus search':'聚焦搜尋框',
@@ -246,6 +249,7 @@
     'No description available for this episode.':'此單集沒有提供說明。'
   };
   const zhHans = {
+    'Custom duration':'自定义时长', 'Minutes':'分钟', 'Start timer':'开始计时',
     'Unable to share. Try copying the link.':'无法分享，请试试复制链接。',
     'Primary color':'主色', 'Lighter shades are generated automatically.':'自动生成搭配的浅色。', 'Reset color':'恢复默认颜色',
     'Focus search':'聚焦搜索框',

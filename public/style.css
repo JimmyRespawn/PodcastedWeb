@@ -24,7 +24,7 @@
 :root[data-theme="light"] .nav-item { color: #526174; }
 :root[data-theme="light"] .nav-item:hover { color: var(--text); background: var(--list-hover); }
 :root[data-theme="light"] .nav-item[aria-current="page"] { color: var(--accent-text); background: var(--accent-subtle); }
-:root[data-theme="light"] .nav-item[aria-current="page"]::before { background: var(--accent); }
+:root[data-theme="light"] .nav-indicator { background: var(--accent); }
 :root[data-theme="dark"] .nav-item[aria-current="page"] { color: var(--accent-text); background: var(--accent-subtle); }
 :root[data-theme="light"] .unified-search { box-shadow: 0 2px 5px rgba(26, 43, 68, 0.03); }
 :root[data-theme="light"] .unified-search:focus-within { box-shadow: 0 0 0 3px var(--accent-ring); }
@@ -85,7 +85,9 @@ a { color: inherit; text-decoration: none; }
 .nav-item:hover { color: var(--colorNeutralForeground1, var(--text)); background: var(--colorSubtleBackgroundHover, var(--input-bg)); }
 .nav-item:active { background: var(--colorSubtleBackgroundPressed, var(--input-bg)); }
 .nav-item[aria-current="page"] { color: var(--colorNeutralForeground1, var(--text)); background: var(--colorNeutralBackground3Selected, var(--input-bg)); }
-.nav-item[aria-current="page"]::before { content: ""; position: absolute; left: 0; top: 50%; width: 3px; height: 20px; transform: translateY(-50%); border-radius: 3px; background: var(--colorCompoundBrandStroke, var(--accent)); }
+.nav-item[aria-current="page"] { z-index: 1; }
+.nav-indicator { position: absolute; left: 0; top: calc(50% - 10px); width: 3px; height: 20px; border-radius: 3px; background: var(--colorCompoundBrandStroke, var(--accent)); pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .nav-item { transition: none; } }
 .nav-item:focus-visible { outline: 2px solid var(--colorStrokeFocus2, var(--focus)); outline-offset: 2px; }
 .app-main { margin-left: 232px; padding: 0 5vw 40px; }
 .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 104px; background: var(--page-bg); border-bottom: 1px solid var(--border); margin-bottom: 44px; }
@@ -348,6 +350,11 @@ body.player-expanded { overflow: hidden; }
 
 .settings-group-title { margin: 32px 0 16px; font-size: 16px; font-weight: 600; }
 #sleepTimerPicker { flex-shrink: 0; width: 160px; }
+#sleepTimerSetting { flex-wrap: wrap; }
+#customTimerForm { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; font-size: 14px; }
+#customTimerMinutes, #customTimerForm button { padding: 7px 10px; border-radius: 5px; border: 1px solid var(--border); font: inherit; }
+#customTimerMinutes { width: 78px; background: var(--input-bg); color: var(--text); }
+#customTimerForm button { color: white; background: var(--accent); }
 .shortcuts-card { padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 .shortcuts-card > p { color: var(--text-muted); font-size: 13px; margin: 0 0 16px; line-height: 1.5; }
 .shortcuts-card dl { margin: 0; }
